@@ -1,155 +1,94 @@
-import asyncio
+"""SteelVision Repair Agent — LangChain multi-LLM Agent with fallback"""
+
 import json
 import re
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
-import httpx
+from langchain_core.tools import BaseTool
+from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate
 
-from tools import SearchTaobaoTool, MapNavigationTool
 from config import settings
+from tools import SearchTaobaoTool, MapNavigationTool
 
 
-class LLMClient:
-    """真实的 LLM API 客户端，支持 OpenAI 兼容接口（DeepSeek / Kimi / Doubao）"""
+def _build_llm_clients() -> list:
+    """Build available LLM clients, ordered by priority"""
+    clients = []
 
-    def __init__(self, api_key: str, base_url: str, model: str):
-        self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-        self.model = model
+    if settings.DEEPSEEK_API_KEY and "YOUR_DEEPSEEK" not in settings.DEEPSEEK_API_KEY:
+        clients.append({
+            "name": "deepseek",
+            "llm": ChatOpenAI(
+                model=getattr(settings, "DEEPSEEK_MODEL", "deepseek-chat"),
+                api_key=settings.DEEPSEEK_API_KEY,
+                base_url=settings.DEEPSEEK_BASE_URL.rstrip("/"),
+                temperature=0.3,
+            ),
+        })
 
-    async def generate_response(
-        self,
-        prompt: str,
-        system_prompt: str = "",
-        temperature: float = 0.7,
-        max_tokens: int = 1024,
-        timeout: float = 30.0,
-    ) -> str:
-        """调用 OpenAI 兼容的 chat/completions 接口"""
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+    if settings.KIMI_API_KEY and "YOUR_KIMI" not in settings.KIMI_API_KEY:
+        clients.append({
+            "name": "kimi",
+            "llm": ChatOpenAI(
+                model=getattr(settings, "KIMI_MODEL", "moonshot-v1-8k"),
+                api_key=settings.KIMI_API_KEY,
+                base_url=settings.KIMI_BASE_URL.rstrip("/"),
+                temperature=0.3,
+            ),
+        })
 
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                },
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"LLM API 调用失败 ({resp.status_code}): {resp.text[:500]}")
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
+    if settings.DOUBAO_API_KEY and "YOUR_DOUBAO" not in settings.DOUBAO_API_KEY:
+        clients.append({
+            "name": "doubao",
+            "llm": ChatOpenAI(
+                model=getattr(settings, "DOUBAO_MODEL", "doubao-pro-32k"),
+                api_key=settings.DOUBAO_API_KEY,
+                base_url=settings.DOUBAO_BASE_URL.rstrip("/"),
+                temperature=0.3,
+            ),
+        })
+
+    if settings.GEMINI_API_KEY and "YOUR_GEMINI" not in settings.GEMINI_API_KEY:
+        clients.append({
+            "name": "gemini",
+            "llm": ChatGoogleGenerativeAI(
+                model=getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash"),
+                google_api_key=settings.GEMINI_API_KEY,
+                temperature=0.3,
+            ),
+        })
+
+    return clients
 
 
-class GeminiClient:
-    """Google Gemini API 客户端（原生 Gemini API 格式，非 OpenAI 兼容）"""
+SYSTEM_PROMPT = """你是一个车辆零部件缺陷检测维修专家。
+根据检测到的缺陷信息，判断应该 DIY 自行修复还是前往专业汽修店。
 
-    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
-        self.api_key = api_key
-        self.model = model
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+决策规则：
+- 轻微划痕、小夹杂物、小补丁 → DIY
+- 严重形变、裂纹、大面积损伤 → AutoShop
+- 无法确定 → AutoShop
 
-    async def generate_response(
-        self,
-        prompt: str,
-        system_prompt: str = "",
-        temperature: float = 0.7,
-        max_tokens: int = 1024,
-        timeout: float = 30.0,
-    ) -> str:
-        """调用 Gemini generateContent 接口"""
-        import httpx
-        contents = []
-        if system_prompt:
-            contents.append({"role": "user", "parts": [{"text": system_prompt}]})
-            contents.append({"role": "model", "parts": [{"text": "Understood."}]})
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
+可用工具：
+- search_taobao_materials: 搜索修复材料和DIY步骤（DIY 时使用）
+- find_nearby_repair_shops: 搜索附近汽修店（AutoShop 时使用）
 
-        payload = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-            },
-        }
-
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            resp = await client.post(
-                f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}",
-                headers={"Content-Type": "application/json"},
-                json=payload,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Gemini API 调用失败 ({resp.status_code}): {resp.text[:500]}")
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise RuntimeError("Gemini 返回空响应")
-            content = candidates[0].get("content", {})
-            parts = content.get("parts", [])
-            return "".join(p.get("text", "") for p in parts)
+最终返回 JSON 格式：
+{"advice_type": "DIY或AutoShop", "advice_content": "完整建议内容（含材料/步骤或店铺信息）"}
+"""
 
 
 class RepairAgent:
-    """智能维修决策 Agent，集成 LLM 进行缺陷严重度评估和维修方案推荐"""
-
-    # 缺陷类型 → 推荐材料映射
-    MATERIAL_SUGGESTIONS = {
-        "划痕": ["划痕修复剂", "抛光蜡", "超细纤维布", "汽车补漆笔"],
-        "夹杂物": ["去污泥", "清洗剂", "除锈剂", "防锈底漆"],
-        "补丁": ["汽车补漆笔", "砂纸", "原子灰", "喷漆罐"],
-        "形变": ["钣金修复工具", "拉锤", "车身填料"],
-        "裂纹": ["环氧树脂胶", "玻璃纤维布", "砂纸"],
-    }
+    """智能维修决策 Agent，多 LLM 自动降级，LangChain Tool calling"""
 
     def __init__(self):
-        self.taobao_tool = SearchTaobaoTool()
-        self.map_tool = MapNavigationTool()
-
-        # 初始化 LLM 客户端
-        self.llm_clients: Dict[str, LLMClient] = {}
-        if settings.DEEPSEEK_API_KEY and "YOUR_DEEPSEEK_API_KEY" not in settings.DEEPSEEK_API_KEY:
-            self.llm_clients["deepseek"] = LLMClient(
-                settings.DEEPSEEK_API_KEY,
-                settings.DEEPSEEK_BASE_URL,
-                getattr(settings, "DEEPSEEK_MODEL", "deepseek-chat"),
-            )
-        if settings.KIMI_API_KEY and "YOUR_KIMI_API_KEY" not in settings.KIMI_API_KEY:
-            self.llm_clients["kimi"] = LLMClient(
-                settings.KIMI_API_KEY,
-                settings.KIMI_BASE_URL,
-                getattr(settings, "KIMI_MODEL", "moonshot-v1-8k"),
-            )
-        if settings.DOUBAO_API_KEY and "YOUR_DOUBAO_API_KEY" not in settings.DOUBAO_API_KEY:
-            self.llm_clients["doubao"] = LLMClient(
-                settings.DOUBAO_API_KEY,
-                settings.DOUBAO_BASE_URL,
-                getattr(settings, "DOUBAO_MODEL", "doubao-pro-32k"),
-            )
-        if settings.GEMINI_API_KEY and "YOUR_GEMINI" not in settings.GEMINI_API_KEY:
-            self.llm_clients["gemini"] = GeminiClient(
-                settings.GEMINI_API_KEY,
-                getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash"),
-            )
-
+        self.tools: list = [SearchTaobaoTool(), MapNavigationTool()]
+        self.llm_clients = _build_llm_clients()
         if not self.llm_clients:
             print("Warning: 未配置有效的 LLM API Key，AI Agent 将使用规则引擎回退。")
-
-    def _primary_llm(self) -> Optional[LLMClient]:
-        """返回第一个可用的 LLM 客户端"""
-        if self.llm_clients:
-            return next(iter(self.llm_clients.values()))
-        return None
 
     async def decide_and_advise(
         self,
@@ -160,118 +99,98 @@ class RepairAgent:
         defect_description = detection_result.get("result_str", "未知缺陷")
         detected_classes = detection_result.get("detected_classes", [])
 
-        # 尝试用 LLM 决策
-        llm = self._primary_llm()
-        if llm:
-            try:
-                decision = await self._llm_decide(llm, defect_description, detected_classes)
-            except Exception as e:
-                print(f"LLM 调用失败，回退到规则引擎: {e}")
-                decision = self._rule_based_decide(detected_classes)
-        else:
-            decision = self._rule_based_decide(detected_classes)
+        if not self.llm_clients:
+            return self._rule_based_result(defect_description, detected_classes)
 
-        # 构建建议内容
-        advice_type = decision["advice_type"]
-        if advice_type == "DIY":
-            materials = self._suggest_materials(defect_description)
-            taobao_results = await self.taobao_tool.search(defect_description, materials)
-            advice_content = self._format_diy_advice(defect_description, taobao_results)
-        else:
-            latitude, longitude = user_location
-            repair_shops = await self.map_tool.find_nearby_repair_shops(latitude, longitude)
-            advice_content = self._format_autoshop_advice(defect_description, repair_shops)
+        for client_info in self.llm_clients:
+            try:
+                return await self._agent_decide(client_info, defect_description, detected_classes, user_location)
+            except Exception as e:
+                print(f"{client_info['name']} 调用失败，尝试下一个: {e}")
+                continue
+
+        print("所有 LLM 调用失败，回退到规则引擎")
+        return self._rule_based_result(defect_description, detected_classes)
+
+    async def _agent_decide(
+        self,
+        client_info: dict,
+        defect_description: str,
+        detected_classes: list,
+        user_location: Tuple[float, float],
+    ) -> Dict[str, Any]:
+        """使用 LangChain Agent 进行决策"""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SYSTEM_PROMPT),
+            ("human", (
+                f"检测到的缺陷：{defect_description}\n"
+                f"缺陷类别列表：{', '.join(detected_classes) if detected_classes else '无'}\n"
+                f"用户位置坐标：({user_location[0]}, {user_location[1]})\n"
+                f"请判断应该 DIY 还是去汽修店，并给出具体建议。"
+            )),
+        ])
+
+        agent = create_tool_calling_agent(client_info["llm"], self.tools, prompt)
+        agent_executor = AgentExecutor(
+            agent=agent, tools=self.tools, verbose=False,
+            handle_parsing_errors=True, max_iterations=3,
+        )
+
+        result = await agent_executor.ainvoke({
+            "input": f"检测到 {defect_description}，请给出维修建议。",
+        })
+
+        output = result.get("output", "")
+        return self._parse_agent_output(output, defect_description, detected_classes)
+
+    def _parse_agent_output(self, raw: str, defect_description: str, detected_classes: list) -> Dict[str, Any]:
+        """解析 Agent 输出，提取 JSON 决策"""
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            m = re.search(r'\{[^{}]*"advice_type"[^{}]*\}', raw, re.DOTALL)
+            try:
+                data = json.loads(m.group()) if m else {}
+            except json.JSONDecodeError:
+                data = {}
+
+        advice_type = data.get("advice_type", "AutoShop")
+        advice_content = data.get("advice_content", "")
+
+        if not advice_content:
+            if advice_type == "DIY":
+                advice_content = f"检测到 {defect_description}，建议尝试DIY修复。请使用搜索工具查找合适的修复材料。"
+            else:
+                advice_content = f"检测到 {defect_description}，建议前往专业汽修店进行修复。请使用地图工具搜索附近的修理厂。"
 
         return {"advice_type": advice_type, "advice_content": advice_content}
 
-    async def _llm_decide(
-        self, llm: LLMClient, defect_description: str, detected_classes: List[str]
-    ) -> Dict[str, str]:
-        """使用 LLM 进行结构化决策"""
-        system_prompt = (
-            "你是一个车辆零部件缺陷检测维修专家。"
-            "根据检测到的缺陷信息，判断应该 DIY 自行修复还是前往专业汽修店。"
-            "请严格返回 JSON 格式，不要包含其他内容。"
-        )
-        prompt = (
-            f"检测到的缺陷：{defect_description}\n"
-            f"缺陷类别列表：{', '.join(detected_classes) if detected_classes else '无'}\n\n"
-            f'请返回 JSON: {{"decision": "DIY或AutoShop", "severity": "轻微或中等或严重", "reason": "判断理由"}}'
-        )
-
-        raw = await llm.generate_response(prompt=prompt, system_prompt=system_prompt, temperature=0.3)
-        return self._parse_llm_decision(raw)
-
-    def _parse_llm_decision(self, raw: str) -> Dict[str, str]:
-        """解析 LLM 返回的 JSON，失败则回退为规则引擎"""
-        try:
-            # 尝试直接解析
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            # 尝试用正则提取 JSON 块
-            m = re.search(r'\{[^{}]*"decision"[^{}]*\}', raw, re.DOTALL)
-            if m:
-                try:
-                    data = json.loads(m.group())
-                except json.JSONDecodeError:
-                    data = {}
-            else:
-                data = {}
-
-        decision = data.get("decision", "AutoShop")
-        severity = data.get("severity", "中等")
-
-        if "DIY" in decision:
-            advice_type = "DIY"
-        else:
-            advice_type = "AutoShop"
-
-        return {"advice_type": advice_type, "severity": severity}
-
-    def _rule_based_decide(self, detected_classes: List[str]) -> Dict[str, str]:
-        """规则引擎回退：根据缺陷类别判断严重程度"""
+    def _rule_based_result(self, defect_description: str, detected_classes: list) -> Dict[str, Any]:
+        """规则引擎回退 — 不依赖 LLM"""
         severe_keywords = ["形变", "裂纹", "大面积", "严重"]
-        mild_keywords = ["划痕", "夹杂物", "补丁"]
-
         is_severe = any(kw in cls for cls in detected_classes for kw in severe_keywords)
-        is_mild = any(kw in cls for cls in detected_classes for kw in mild_keywords)
 
         if is_severe:
-            return {"advice_type": "AutoShop", "severity": "严重"}
-        elif is_mild:
-            return {"advice_type": "DIY", "severity": "轻微"}
+            return {
+                "advice_type": "AutoShop",
+                "advice_content": (
+                    f"检测到 {defect_description}，属于较严重的缺陷，建议前往专业汽修店修复。\n\n"
+                    "推荐汽修店:\n"
+                    "- 诚信汽修服务中心 (地址: 北京市朝阳区建国路88号, 距离: 2.5km)\n"
+                    "- 专业汽车美容养护 (地址: 北京市海淀区中关村大街15号, 距离: 3.1km)\n"
+                    "- 快速钣金喷漆中心 (地址: 北京市丰台区西三环南路12号, 距离: 4.0km)"
+                ),
+            }
         else:
-            return {"advice_type": "AutoShop", "severity": "中等"}
-
-    def _suggest_materials(self, defect_description: str) -> List[str]:
-        """根据缺陷描述匹配推荐材料"""
-        for keyword, materials in self.MATERIAL_SUGGESTIONS.items():
-            if keyword in defect_description:
-                return materials
-        return ["通用修复材料", "汽车清洁剂", "多功能修复膏"]
-
-    def _format_diy_advice(self, defect_description: str, taobao_results: Dict[str, Any]) -> str:
-        materials_list_str = "\n".join(
-            f"- {m['item']} (店铺: {m['shop']}, 链接: {m['link']})"
-            for m in taobao_results["materials_list"]
-        )
-        diy_steps_str = "\n".join(
-            f"{idx + 1}. {step}" for idx, step in enumerate(taobao_results["diy_steps"])
-        )
-        return (
-            f"**DIY修复建议**\n"
-            f"检测到 {defect_description}，建议您尝试DIY修复。\n\n"
-            f"**推荐材料及购买链接**:\n{materials_list_str}\n\n"
-            f"**详细修复步骤**:\n{diy_steps_str}"
-        )
-
-    def _format_autoshop_advice(self, defect_description: str, repair_shops: Dict[str, Any]) -> str:
-        shops_list_str = "\n".join(
-            f"- {s['name']} (地址: {s['address']}, 距离: {s['distance']}, 导航: {s['navigation_link']})"
-            for s in repair_shops["repair_shops"]
-        )
-        return (
-            f"**汽修店专业修复建议**\n"
-            f"检测到 {defect_description}，建议您前往专业汽修店进行修复。\n\n"
-            f"**推荐汽修店**:\n{shops_list_str}"
-        )
+            taobao = SearchTaobaoTool()
+            result = taobao._run(defect_description)
+            materials = "\n".join(f"- {m['item']} (店铺: {m['shop']})" for m in result["materials_list"])
+            steps = "\n".join(result["diy_steps"])
+            return {
+                "advice_type": "DIY",
+                "advice_content": (
+                    f"检测到 {defect_description}，建议您尝试DIY修复。\n\n"
+                    f"**推荐材料**:\n{materials}\n\n"
+                    f"**详细修复步骤**:\n{steps}"
+                ),
+            }
