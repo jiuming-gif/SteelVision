@@ -1,0 +1,32 @@
+# === SteelVision 完整依赖 ===
+# 安装命令: pip install -r requirements_full.txt --break-system-packages
+# 注意: PyTorch 建议先去 https://pytorch.org 安装对应 CUDA 版本
+
+# --- 后端服务 ---
+fastapi==0.110.0
+uvicorn==0.27.1
+SQLAlchemy==2.0.28
+pydantic==2.6.1
+python-dotenv==1.0.1
+httpx==0.27.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-multipart==0.0.9
+
+# --- 深度学习 ---
+torch==2.2.1
+torchvision==0.17.1
+numpy==1.26.4
+Pillow==10.2.0
+
+# --- 桌面客户端 ---
+PyQt5==5.15.9
+opencv-python==4.9.0.80
+matplotlib==3.8.2
+
+# --- MySQL 驱动（客户端统计功能，可选）---
+pymysql==1.1.0
+
+# --- 工具类 ---
+requests==2.31.0
+tqdm==4.66.1

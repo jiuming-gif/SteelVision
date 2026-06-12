@@ -1,0 +1,40 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.db
+
+# Model weights
+*.pth
+
+# Build artifacts
+*.exe
+*.spec
+build/
+dist/
+
+# Logs
+*.log
+
+# Node / Frontend
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+.ipynb_checkpoints/
+
+# Tcl/Tk runtime (bundled with PyInstaller)
+lib/tcl8.6/
+lib/tk8.6/
+
+# Superpowers plugin artifacts
+docs/superpowers/
+.superpowers/
+
+# Settings local override
+settings.local.json
