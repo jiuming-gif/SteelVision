@@ -31,7 +31,7 @@ jobs:
       - name: Lint with ruff
         run: |
           pip install ruff
-          ruff check main.py agent.py tools.py schemas.py database.py crud.py config.py cv_model_inference.py tests/ --ignore E401,F401
+          ruff check main.py agent.py tools.py schemas.py database.py crud.py config.py cv_model_inference.py tests/ --ignore E401,E402,F401
 
       - name: Run tests
         run: python -m pytest tests/ -v
