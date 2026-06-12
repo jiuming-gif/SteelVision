@@ -51,6 +51,55 @@ class LLMClient:
             return data["choices"][0]["message"]["content"]
 
 
+class GeminiClient:
+    """Google Gemini API 客户端（原生 Gemini API 格式，非 OpenAI 兼容）"""
+
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+
+    async def generate_response(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        temperature: float = 0.7,
+        max_tokens: int = 1024,
+        timeout: float = 30.0,
+    ) -> str:
+        """调用 Gemini generateContent 接口"""
+        import httpx
+        contents = []
+        if system_prompt:
+            contents.append({"role": "user", "parts": [{"text": system_prompt}]})
+            contents.append({"role": "model", "parts": [{"text": "Understood."}]})
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+
+        payload = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_tokens,
+            },
+        }
+
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+            resp = await client.post(
+                f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"Gemini API 调用失败 ({resp.status_code}): {resp.text[:500]}")
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                raise RuntimeError("Gemini 返回空响应")
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            return "".join(p.get("text", "") for p in parts)
+
+
 class RepairAgent:
     """智能维修决策 Agent，集成 LLM 进行缺陷严重度评估和维修方案推荐"""
 
@@ -86,6 +135,11 @@ class RepairAgent:
                 settings.DOUBAO_API_KEY,
                 settings.DOUBAO_BASE_URL,
                 getattr(settings, "DOUBAO_MODEL", "doubao-pro-32k"),
+            )
+        if settings.GEMINI_API_KEY and "YOUR_GEMINI" not in settings.GEMINI_API_KEY:
+            self.llm_clients["gemini"] = GeminiClient(
+                settings.GEMINI_API_KEY,
+                getattr(settings, "GEMINI_MODEL", "gemini-2.0-flash"),
             )
 
         if not self.llm_clients:

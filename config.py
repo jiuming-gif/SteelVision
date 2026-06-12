@@ -23,6 +23,10 @@ class Settings:
     DOUBAO_BASE_URL: str = os.getenv("DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
     DOUBAO_MODEL: str = os.getenv("DOUBAO_MODEL", "doubao-pro-32k")
 
+    # Gemini (Google)
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
     # 淘宝/电商 API（可选）
     TAOBAO_API_KEY: str = os.getenv("TAOBAO_API_KEY", "")
 
