@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install fastapi uvicorn SQLAlchemy pydantic python-dotenv httpx passlib bcrypt python-multipart numpy Pillow requests langchain langchain-openai langchain-google-genai pytest pytest-asyncio
+          pip install fastapi uvicorn SQLAlchemy pydantic python-dotenv httpx passlib bcrypt python-multipart numpy Pillow requests "langchain==0.3.0" "langchain-openai==0.2.0" "langchain-google-genai==2.0.0" pytest pytest-asyncio
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
       - name: Lint with ruff
